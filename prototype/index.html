@@ -1,0 +1,1656 @@
+<!DOCTYPE html>
+<!--
+    Document   : index
+    Created on : Feb 23, 2012, 4:53:30 PM
+    Author     : jeffthomas
+-->
+
+<script type="text/javascript">
+"use strict";
+
+
+////////////////////////////////////////////////////
+//
+//          Mojo permissions object
+//
+////////////////////////////////////////////////////
+
+// permissions
+var PERMISSION_NONE = 0x00;
+var PERMISSION_EXECUTE = 0x01;
+var PERMISSION_WRITE = 0x02;
+var PERMISSION_READ = 0x04;
+
+function MojoPermissions()
+{
+}
+
+MojoPermissions.prototype.process = PERMISSION_READ | PERMISSION_WRITE | PERMISSION_EXECUTE;
+MojoPermissions.prototype.group = PERMISSION_READ;
+MojoPermissions.prototype.other = PERMISSION_NONE;
+
+////////////////////////////////////////////////////
+//
+//          Mojo basic object
+//
+////////////////////////////////////////////////////
+
+// groups
+var GROUP_SYSTEM = "system";
+var GROUP_WIZARD = "wizard";
+var GROUP_BUILDER = "builder";
+var GROUP_PROCESS = "process";
+var GROUP_PUBLIC = "public";
+
+
+function MojoObject(process, parent, owner, name, value)
+{
+    this.process = process;
+    this.owner = owner;
+    this.owner = (owner != null && owner != undefined ? owner.group : GROUP_SYSTEM);
+    this.name = name;
+    this.value = value;
+    this.parents = [];
+    this.parents.push(parent);
+
+    this.getProcess = function(){
+        var test = this;
+        while(test.process == null || test.process == undefined){
+            test = test.owner;
+            if (test == null || test == undefined){
+                return null;
+            }
+        }
+        return test.process
+    }
+
+    this.getPermissions = function(){
+        var test = this;
+        while(test.permissions == null || test.permissions == undefined){
+            test = test.owner;
+            if (test == null || test == undefined){
+                return null;
+            }
+        }
+        return test.permissions
+    }
+}
+
+MojoObject.prototype.process = null;
+MojoObject.prototype.parents = [];
+MojoObject.prototype.owner = null;
+MojoObject.prototype.groups = [GROUP_SYSTEM];
+MojoObject.prototype.name = "Object";
+MojoObject.prototype.value = null;
+MojoObject.prototype.attributes = {};
+MojoObject.prototype.permissions = new MojoPermissions();
+
+
+////////////////////////////////////////////////////
+//
+//          Mojo Process
+//
+////////////////////////////////////////////////////
+
+function MojoProcess(scope, owner, name)
+{
+    this.owner = owner;
+    this.name = name;
+    this.isProcess = true;
+    this.scope = scope;
+    //this.scope.process = this;
+    this.taskStack = [];
+    this.taskStack.push(scope);
+}
+
+MojoProcess.prototype = new MojoObject;
+MojoProcess.constructor = MojoProcess;
+MojoProcess.prototype.taskStack = [];
+MojoProcess.prototype.isProcess = false;
+MojoProcess.prototype.scope = null;
+MojoProcess.prototype.tokens = null;
+MojoProcess.prototype.stack = [];
+MojoProcess.prototype.heap = [];
+
+
+////////////////////////////////////////////////////
+//
+//          Mojo Scope
+//
+////////////////////////////////////////////////////
+
+function MojoScope(tokens, index, process, parent)
+{
+    this.tokens = tokens;
+    this.process = process;
+    this.parent = parent;
+    this.index = index;
+    this.namespace = {};
+}
+
+MojoScope.prototype = new MojoObject;
+MojoScope.constructor = MojoScope;
+MojoScope.prototype.tokens = [];
+MojoScope.prototype.namespace = {};
+MojoScope.prototype.nameCount = 0;
+MojoScope.prototype.index = 0;
+MojoScope.prototype.ifSkip = 0;
+
+////////////////////////////////////////////////////
+//
+//          Mojo Var
+//
+////////////////////////////////////////////////////
+
+function MojoVar(owner, name, value)
+{
+    this.owner = owner;
+    this.name = name;
+    this.value = value;
+}
+
+MojoVar.prototype = new MojoObject;
+MojoVar.constructor = MojoVar;
+
+////////////////////////////////////////////////////
+//
+//          Mojo Heap Entry
+//
+////////////////////////////////////////////////////
+
+var HEAP_TYPE_CONST = "heap_type_const";
+var HEAP_TYPE_TEMP = "heap_type_temp";
+var HEAP_TYPE_VAR = "heap_type_var";
+
+function MojoHeapEntry(scope, object, type)
+{
+    this.scope = scope;
+    this.object = object;
+    this.type = type;
+}
+
+////////////////////////////////////////////////////
+//
+//          Mojo Environment Init
+//
+////////////////////////////////////////////////////
+
+// returns the main mojo environment
+function MojoInit(script)
+{
+    var scriptTokens = parse(script);
+    document.getElementById("tokens").value = scriptTokens;
+    var scope = new MojoScope(scriptTokens, 0, null, null);
+    var mojo = new MojoProcess(scope, null, "mojo", "mojo");
+    mojo.owner = mojo;
+    mojo.process = mojo;
+    mojo.executionStack = [];
+
+    scope.owner = mojo;
+
+    //mojo.executionStack.push(mainProcess);
+
+    // environment gets the execution code
+
+    mojo.resolveVars = function(result, scope, process, firstHE, firstVar, secondHE, secondVar) {
+        if (firstHE.type == HEAP_TYPE_CONST){
+            firstHE.object.value = result;
+            process.heap.push(firstHE);
+        } else if (secondHE.type == HEAP_TYPE_CONST){
+            secondHE.object.value = result;
+            process.heap.push(secondHE);
+        } else {
+            process.heap.push(new MojoHeapEntry(scope,new MojoVar(scope.owner,result,result),HEAP_TYPE_CONST));
+        }    
+    }
+    
+    mojo.checkPermission = function(variable, tester, permission){
+        // find the permissions of this var
+        var permissions = variable.permissions
+        var process = variable.getProcess();
+        var groups = variable.groups;
+        var groupOwner = variable.owner;
+
+        // if this object doesn't have permissions climb the owner tree looking for them
+        permissions = variable.getPermissions();
+        if (permissions == null || permissions == undefined){
+            alert("No permissions found!");
+            return false;
+        }
+        //alert(JSON.stringify(permissions));
+        // check which permission set we should be testing against
+        if (tester == process){ // process permissions
+            return permissions.process & permission;
+        }
+        // check groups
+        // go up the owner list looking for groups
+        while ((groups == null || groups == undefined) 
+                && (groupOwner != null && groupOwner != undefined)){
+            if (groupOwner.permissions != null && groupOwner.permissions != undefined){
+                groups = groupOwner.groups;
+             } else {
+                groupOwner = groupOwner.owner;
+             }
+        }
+        if (groups != null && groups != undefined){
+            // TODO test group lists
+            //return false;
+        }
+        
+        // everyone
+        return permissions.other & permission;
+     }
+    
+    mojo.run = function (processIndex)
+    {
+        var process = this.executionStack[processIndex];
+
+        var scope = process.taskStack.pop();
+        // do the task, if it's not done push it back into the stack
+        if (scope != null && scope != undefined)
+        {
+            var command = scope.tokens[scope.index];
+
+
+            // do this command
+            switch (command[0])
+            {
+                case '~': // const string
+                    var string = command.substring(1, command.length);
+                    //scope.namespace[scope.nameCount] = new MojoVar(scope.owner,string,string);
+                    process.heap.push(new MojoHeapEntry(scope,new MojoVar(scope.owner,string,string),HEAP_TYPE_CONST));
+                    break;
+                case '#': // const number
+                    var number = parseFloat(command.substring(1, command.length));
+                    //scope.namespace[scope.nameCount] = new MojoVar(scope.owner,number,number);
+                    process.heap.push(new MojoHeapEntry(scope,new MojoVar(scope.owner,number,number),HEAP_TYPE_CONST));
+                    break;
+                case '.': // variable
+                    var variableName = command.substring(1, command.length);
+                    // look for it in our current scope
+                    var currentScope = scope;
+                    var variable = scope.namespace[variableName];
+                    // look for it in our parent scopes
+                    while ((variable == undefined || variable == null) && currentScope.parent != null){
+                        currentScope = currentScope.parent;
+                        variable = currentScope.namespace[variableName];
+                        if (variable != null && variable != undefined){
+                            break;
+                        }
+                    }
+                    if (variable == undefined || variable == null){
+                        // not found, need to create new variable
+                        //scope.namespace[variableName] = new MojoVar(scope.owner,variableName,null);
+                        // TODO: Throw an error?
+                    }
+                    process.heap.push(new MojoHeapEntry(currentScope,variableName,HEAP_TYPE_VAR));
+                    break;
+                case 'l': // prefix
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = scope.namespace[firstVar];
+                    switch (command.substring(1, command.length))
+                    {
+                        case 'var':
+                            // create a new variable
+                            // find out if this one exists in THIS scope already
+                            if (firstVar == null){
+                                // it doesn't create it
+                                scope.namespace[firstHE.object] = new MojoVar(scope.owner,firstHE.object,null);
+                            }
+                            // this var must be in this scope
+                            process.heap.push(new MojoHeapEntry(scope,firstHE.object,HEAP_TYPE_VAR));
+                            break;
+                        case '++':
+                            firstVar.value = (firstVar.value-0) + 1;
+                            process.heap.push(firstHE);
+                            break;                                              
+                        case '--':
+                            firstVar.value = (firstVar.value-0) - 1;
+                            process.heap.push(firstHE);
+                            break;                                              
+                        default:
+                            alert("Prefix not found '" + command.substring(1, command.length) + "'");
+                            break;
+                    }
+                    break;
+                case '=': // assignment
+                    var secondHE = process.heap.pop();
+                    var secondVar = secondHE.object;
+                    if (secondHE.type == HEAP_TYPE_VAR)
+                        secondVar = secondHE.scope.namespace[secondVar];
+                    var secondNumber = !isNaN(secondVar.value-0);
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = firstHE.scope.namespace[firstVar];
+                    var firstNumber = !isNaN(firstVar.value-0);                    
+                    //alert(JSON.stringify(firstVar));
+                                        
+                    // TODO: strengthen permissions checking
+
+                    if (firstHE.type == HEAP_TYPE_VAR && this.checkPermission(firstVar, this.getProcess(), PERMISSION_WRITE)){
+                        firstVar.value = secondVar.value;
+                        process.heap.push(firstHE);
+                    }
+
+                    break;
+                case '{': // new scope
+                    process.heap.push('{');
+                    var newScope = new MojoScope(scope.tokens,scope.index,process,scope);
+                    scope = newScope;
+                    break; 
+                case '}': // end scope
+                    scope.parent.index = scope.index;
+                    scope = scope.parent;
+                    //alert(process.heap.length);
+                    while(process.heap.length > 0 && process.heap[process.heap.length-1] != '{'){
+                         process.heap.pop();
+                    }
+                    process.heap.pop();
+                    break;
+                case 'j': // jump
+                    var skip = parseInt(command.substring(1, command.length));
+                    scope.index += skip;
+                    break;
+                case 'b': // break jump. These always go forward and can jump out of scopes
+                    var jumps = command.substring(1, command.length).split('s');
+                    var skip = scope.index + parseInt(jumps[0]) - 1;
+                    var scopes = parseInt(jumps[1]);
+                    while(scopes > 0){
+                        scope = scope.parent;
+                        while(process.heap.length > 0 && process.heap[process.heap.length-1] != '{'){
+                            process.heap.pop();
+                        }
+                        process.heap.pop();
+                        scopes--;
+                    }
+                    scope.index = skip;
+                    break;
+                case '?': // if
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = firstHE.scope.namespace[firstVar];
+                    var firstNumber = !isNaN(firstVar.value-0);
+                    if (!firstVar.value){
+                        var skip = parseInt(command.substring(1, command.length));
+                        scope.index += skip;
+                        // check for else and skip it
+                        if (scope.index+1 < scope.tokens.length && scope.tokens[scope.index+1][0] == ':'){
+                            scope.index++;
+                        }
+                    } else {
+                        scope.ifSkip += 1;
+                    }
+                    break;
+                case '/': // case
+                    var secondHE = process.heap.pop();
+                    var secondVar = secondHE.object;
+                    if (secondHE.type == HEAP_TYPE_VAR)
+                        secondVar = secondHE.scope.namespace[secondVar];
+                    var secondNumber = !isNaN(secondVar.value-0);
+                    var firstHE = process.heap.pop();
+                    if (firstHE != undefined && firstHE != null){
+                        if (firstHE == '{'){
+                            process.heap.push(firstHE);
+                        } else {
+                            var firstVar = firstHE.object;
+                            if (firstHE.type == HEAP_TYPE_VAR)
+                                firstVar = firstHE.scope.namespace[firstVar];
+                            var firstNumber = !isNaN(firstVar.value-0);
+                            if (firstVar.value == secondVar.value){
+                                break;
+                            }
+                        }
+                    }
+                    // not a match, or nothing to test against
+                    process.heap.push(firstHE);
+                    var skip = parseInt(command.substring(1, command.length));
+                    scope.index += skip;
+                    break;
+                case ':': // else
+                    if (scope.ifSkip){
+                        scope.ifSkip -= 1;
+                        var skip = parseInt(command.substring(1, command.length));
+                        scope.index += skip;
+                    }
+                    break;
+                case ';': // end of statement, clear anything left in the heap
+                    scope.ifSkip = 0;
+                    while(process.heap.length > 0 && process.heap[process.heap.length-1] != '{'){
+                        process.heap.pop();
+                    }
+                    break;
+                case 'r': // right hand single operator
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = firstHE.scope.namespace[firstVar];
+                    var firstNumber = !isNaN(firstVar.value-0);
+                    // save the unmodified value
+                    process.heap.push(new MojoHeapEntry(scope,new MojoVar(scope.owner,firstVar.value,firstVar.value),HEAP_TYPE_CONST));
+                    switch (command.substring(1, command.length))
+                    {
+                        case '++':
+                            // increment value
+                            firstVar.value = (firstVar.value-0) + 1;
+                            break;
+                        case '--':
+                            // decrement value
+                            firstVar.value = (firstVar.value-0) - 1;
+                            break;
+                    }
+                    break;
+                case '&': // conditional
+                    //  TODO: test for read permissions from non temp vars
+                    var secondHE = process.heap.pop();
+                    var secondVar = secondHE.object;
+                    if (secondHE.type == HEAP_TYPE_VAR)
+                        secondVar = secondHE.scope.namespace[secondVar];
+                    var secondNumber = !isNaN(secondVar.value-0);
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = firstHE.scope.namespace[firstVar];
+                    var firstNumber = !isNaN(firstVar.value-0);
+                    switch (command.substring(1, command.length))
+                    {
+                        case '==':
+                            if (firstVar.value == secondVar.value){
+                                this.resolveVars(1, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            } else {
+                                this.resolveVars(0, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            }
+                            break;
+                        case '>':
+                            if (firstVar.value > secondVar.value){
+                                this.resolveVars(1, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            } else {
+                                this.resolveVars(0, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            }
+                            break;
+                        case '<':
+                            if (firstVar.value < secondVar.value){
+                                this.resolveVars(1, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            } else {
+                                this.resolveVars(0, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            }
+                            break;
+                        case '>=':
+                            if (firstVar.value >= secondVar.value){
+                                this.resolveVars(1, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            } else {
+                                this.resolveVars(0, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            }
+                            break;
+                        case '<=':
+                            if (firstVar.value <= secondVar.value){
+                                this.resolveVars(1, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            } else {
+                                this.resolveVars(0, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            }
+                            break;
+                    }
+                    break;
+                case '+': // operator
+                    //  TODO: test for read permissions from non temp vars
+                    var secondHE = process.heap.pop();
+                    var secondVar = secondHE.object;
+                    if (secondHE.type == HEAP_TYPE_VAR)
+                        secondVar = secondHE.scope.namespace[secondVar];
+                    var secondNumber = !isNaN(secondVar.value-0);
+                    var firstHE = process.heap.pop();
+                    var firstVar = firstHE.object;
+                    if (firstHE.type == HEAP_TYPE_VAR)
+                        firstVar = firstHE.scope.namespace[firstVar];
+                    var firstNumber = !isNaN(firstVar.value-0);
+                    //alert(firstVar.value + ", " + secondVar.value);
+                    switch (command.substring(1, command.length))
+                    {
+                        case '+':
+                            if (!firstNumber || !secondNumber){ // if either of the values are strings we do string concat
+                                if (firstNumber)
+                                    firstVar.value = new String(firstVar.value);
+                                if (secondNumber)
+                                    secondVar.value = new String(secondVar.value);
+                                var result = firstVar.value + secondVar.value;
+                            } else { // else we do numbers
+                                var result = firstVar.value + secondVar.value;
+                            }
+                            this.resolveVars(result, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            break;
+                        case '*':
+                            if (!firstNumber && secondNumber){ // if the first is a string and the second a number we duplicate
+                                var result = firstVar.value * secondVar.value;
+                            } else { // else we do numbers
+                                var result = (firstVar.value-0) * (secondVar.value-0);
+                            }
+      
+                            this.resolveVars(result, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            break;
+                        case '-':
+                            var result = (firstVar.value-0) - (secondVar.value-0);
+                            this.resolveVars(result, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            break;                        
+                        case '/':
+                            var result = (firstVar.value-0) / (secondVar.value-0);
+                            this.resolveVars(result, scope, process, firstHE, firstVar, secondHE, secondVar);
+                            break;
+                            break;                                              
+                        default:
+                            alert("Operator not found '" + command.substring(1, command.length) + "'");
+                            break;
+                    }
+                    break;
+                default:
+                    alert("Token not found '" + command[0] + "'");
+            }
+
+
+            scope.index++;
+            if (scope.index < scope.tokens.length)
+            {
+                process.taskStack.push(scope);
+            } else
+            {
+                if (process.heap.length == 0){
+                    alert("Nothing left in heap.")
+                } else {
+                    var secondHE = process.heap.pop();
+                    var secondVar = secondHE.object;
+                    if (secondHE.type == HEAP_TYPE_VAR)
+                        secondVar = secondHE.scope.namespace[secondVar];
+                    document.getElementById("results").value = secondVar.value;
+                    //alert("result: " + secondVar.value);
+                    //if (process.stack.length > 0)
+                    //{
+                    //    process.taskStack.shift(process.stack.shift());
+                    //}
+                }
+            }
+        }
+
+        setTimeout(function (time)
+        {
+            mojo.run(processIndex);
+        }, 0);
+    }
+
+    mojo.addProcess = function (process)
+    {
+        this.executionStack.push(process);
+        setTimeout(function (time)
+        {
+            mojo.run(mojo.executionStack.length - 1);
+        }, 1);
+    }
+
+    mojo.addProcess(mojo);
+
+    return mojo;
+}
+
+////////////////////////////////////////////////////
+//
+//          parsing elements
+//
+////////////////////////////////////////////////////
+
+
+var PRECEDENT_ASSIGNMENT = 1;
+var PRECEDENT_CONDITIONAL = 2;
+var PRECEDENT_SUM = 3;
+var PRECEDENT_PRODUCT = 4;
+var PRECEDENT_EXPONENT = 5;
+var PRECEDENT_PREFIX = 6;
+var PRECEDENT_POSTFIX = 7;
+var PRECEDENT_CALL = 8;
+var PRECEDENT_END = 100;
+
+var VAR_LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+var NUMBERS = "0123456789.";
+
+/* expressions */
+function NameExpression(name)
+{
+    this.name = name;
+    this.value = 0;
+}
+NameExpression.prototype.serialize = function (out)
+{
+    out = " '" + this.name.text + "' ";
+    return out;
+}
+NameExpression.prototype.tokenize = function (stream)
+{
+    stream.push('.' + this.name.text);
+}
+function ConstExpression(con, type)
+{
+    this.con = con;
+    this.type = type;
+}
+ConstExpression.prototype.serialize = function (out)
+{
+    out = this.con;
+    return out;
+}
+ConstExpression.prototype.tokenize = function (stream)
+{
+    stream.push((this.type == NUMBER ? '#' : '~') + this.con.text);
+}
+function PrefixExpression(operator, right)
+{
+    this.operator = operator;
+    this.right = right;
+}
+PrefixExpression.prototype.serialize = function (out)
+{
+    out = this.operator.text + this.right.serialize(out);
+    return out;
+}
+PrefixExpression.prototype.tokenize = function (stream)
+{
+    this.right.tokenize(stream);
+    stream.push('l' + this.operator.text);
+}
+function PostfixExpression(left, operator)
+{
+    this.operator = operator;
+    this.left = left;
+}
+PostfixExpression.prototype.serialize = function (out)
+{
+    out = this.left.serialize(out) + this.operator.text;
+    return out;
+}
+PostfixExpression.prototype.tokenize = function (stream)
+{
+    this.left.tokenize(stream);
+    stream.push('r' + this.operator.text);
+}
+function OperatorExpression(left, operator, right)
+{
+    this.left = left;
+    this.operator = operator;
+    this.right = right;
+}
+OperatorExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.left.serialize(out) + this.operator.text + this.right.serialize(out) + ")";
+    return out;
+}
+OperatorExpression.prototype.tokenize = function (stream)
+{
+    this.left.tokenize(stream);
+    this.right.tokenize(stream);
+    stream.push('+' + this.operator.text);
+}
+function AssignExpression(left, right)
+{
+    this.left = left;
+    this.right = right;
+}
+AssignExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.left.serialize(out) + ASSIGN + this.right.serialize(out) + ")";
+    return out;
+}
+AssignExpression.prototype.tokenize = function (stream)
+{
+    this.left.tokenize(stream);
+    this.right.tokenize(stream);
+    stream.push('=');
+}
+function ComparisonExpression(left, operator, right)
+{
+    this.left = left;
+    this.operator = operator;
+    this.right = right;
+}
+ComparisonExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.left.serialize(out) + ASSIGN + this.right.serialize(out) + ")";
+    return out;
+}
+ComparisonExpression.prototype.tokenize = function (stream)
+{
+    this.left.tokenize(stream);
+    this.right.tokenize(stream);
+    stream.push('&' + this.operator.text);
+}
+function ConditionalExpression(condition, thenArm)
+{
+    this.condition = condition;
+    this.thenArm = thenArm;
+    //this.elseArm = elseArm;
+}
+ConditionalExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.condition.serialize(out) + "?" + this.thenArm.serialize(out) + ")";
+    return out;
+}
+ConditionalExpression.prototype.tokenize = function (stream)
+{
+    this.condition.tokenize(stream);
+    var tempStream = [];
+    this.thenArm.tokenize(tempStream);
+    stream.push('?'+tempStream.length);
+    for(var c in tempStream){
+        stream.push(tempStream[c]);
+    }
+}
+function ElseExpression(elseArm)
+{
+    this.elseArm = elseArm;
+}
+ElseExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.elseArm.serialize(out) + ")";
+    return out;
+}
+ElseExpression.prototype.tokenize = function (stream)
+{
+    var tempStream = [];
+    this.elseArm.tokenize(tempStream);
+    stream.push(':'+tempStream.length);
+    for(var c in tempStream){
+        stream.push(tempStream[c]);
+    }
+}
+function CaseExpression(condition, body)
+{
+    this.condition = condition;
+    this.body = body;
+}
+CaseExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.body.serialize(out) + ")";
+    return out;
+}
+CaseExpression.prototype.tokenize = function (stream)
+{
+    // the condition to test the top of the heap against
+    this.condition.tokenize(stream);
+    // parse the body
+    var tempStream = [];
+    for(var c in this.body){
+        this.body[c].tokenize(tempStream);
+    }
+    // push the case statement
+    stream.push('/'+tempStream.length);
+    // push the body
+    for(var c in tempStream){
+        stream.push(tempStream[c]);
+    }
+}
+function WhileExpression(name, condition, body)
+{
+    this.condition = condition;
+    this.body = body;
+    //this.elseArm = elseArm;
+}
+WhileExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.condition.serialize(out) + " while " + this.body.serialize(out) + ")";
+    return out;
+}
+WhileExpression.prototype.tokenize = function (stream)
+{
+    var start = stream.length;
+    for(var conIndex in this.condition){
+        this.condition[conIndex].tokenize(stream);
+    }
+    var tempStream = [];
+    this.body.tokenize(tempStream);
+    var doneJump = tempStream.length+1;
+    // conditional
+    stream.push('?'+doneJump);
+    // push the body into the code stream, watch for scopes and breaks
+    var scopeDepth = 0;
+    for(var c in tempStream){
+        switch(tempStream[c]){
+            case '{':
+                scopeDepth++;
+                break;
+            case '}':
+                scopeDepth--;
+                break;
+            case 'b':
+                tempStream[c] = 'b' + (doneJump - c) + 's' + scopeDepth;
+        }
+        stream.push(tempStream[c]);
+    }
+    // loop back jump
+    stream.push("j" + (start - stream.length - 1))
+}
+function SwitchExpression(name, condition, body)
+{
+    this.condition = condition;
+    this.body = body;
+}
+SwitchExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.condition.serialize(out) + " while " + this.body.serialize(out) + ")";
+    return out;
+}
+SwitchExpression.prototype.tokenize = function (stream)
+{
+    var conditionStream = [];
+    this.condition.tokenize(conditionStream);
+    var tempStream = [];
+    this.body.tokenize(tempStream);
+    // if this switch has a scope body we're going to stick the conditional into it
+    if (tempStream.length > 0 && tempStream[0] == '{'){
+        var doneJump = tempStream.length + conditionStream.length;
+        var scopeDepth = 0;
+        var count = 0;
+        for(var b in tempStream){
+            if (b == 1){
+                // push the conditional into the top of the scope, watch for scopes and breaks
+                for(var c in conditionStream){
+                    switch(conditionStream[c]){
+                        case '{':
+                            scopeDepth++;
+                            break;
+                        case '}':
+                            scopeDepth--;
+                            break;
+                        case 'b':
+                            conditionStream[c] = 'b' + (doneJump - count) + 's' + scopeDepth;
+                    }
+                    stream.push(conditionStream[c]);
+                    count++;
+                }
+            }
+            switch(tempStream[b]){
+                case '{':
+                    scopeDepth++;
+                    break;
+                case '}':
+                    scopeDepth--;
+                    break;
+                case 'b':
+                    tempStream[b] = 'b' + (doneJump - count) + 's' + scopeDepth;
+            }
+            stream.push(tempStream[b]);
+            count++;
+        }
+    } else {
+        // push the body into the code stream, watch for scopes and breaks
+        var scopeDepth = 0;
+        for(var c in tempStream){
+            stream.push(tempStream[c]);
+        }
+    }
+}
+function ForExpression(name, condition, body)
+{
+    this.condition = condition;
+    this.body = body;
+    //this.elseArm = elseArm;
+}
+ForExpression.prototype.serialize = function (out)
+{
+    out = "(" + this.condition.serialize(out) + " while " + this.body.serialize(out) + ")";
+    return out;
+}
+ForExpression.prototype.tokenize = function (stream)
+{
+    // put in the initializer
+    this.condition[0].tokenize(stream);
+    // save the start of the loop
+    var start = stream.length;
+    // put in the conditional
+    var tempStream = [];
+    this.condition[1].tokenize(stream);
+    // store the body
+    this.body.tokenize(tempStream);
+    // append the incrementer
+    this.condition[2].tokenize(tempStream);
+    var doneJump = tempStream.length+1;
+    // save the conditional jump
+    stream.push('?'+doneJump);
+    // save the body
+    // watch for scopes and breaks
+    var scopeDepth = 0;
+    for(var c in tempStream){
+        switch(tempStream[c]){
+            case '{':
+                scopeDepth++;
+                break;
+            case '}':
+                scopeDepth--;
+                break;
+            case 'b':
+                tempStream[c] = 'b' + (doneJump - c) + 's' + scopeDepth;
+        }
+        stream.push(tempStream[c]);
+    }
+    // save the loop back
+    stream.push("j" + (start - stream.length - 1))
+}
+function CallExpression(functionName, args)
+{
+    this.functionName = functionName;
+    this.args = args;
+}
+CallExpression.prototype.serialize = function (out)
+{
+    out = this.functionName.name.text + "(";
+    for (var argIndex in this.args)
+    {
+        out += this.args[argIndex].serialize(out);
+    }
+    out += ")";
+    return out;
+};
+CallExpression.prototype.tokenize = function (stream)
+{
+    for (var argIndex in this.args)
+    {
+        var tempStream = [];
+        this.args[argIndex].tokenize(tempStream);
+        for(var c in tempStream){
+            stream.push(tempStream[c]);
+        }
+    }
+    stream.push('<' + this.functionName.name.text);
+}
+function PassThroughExpression(token)
+{
+    this.token = token;
+}
+PassThroughExpression.prototype.serialize = function (out)
+{
+    return out;
+};
+PassThroughExpression.prototype.tokenize = function (stream)
+{
+    stream.push(this.token.text)
+    return;
+}
+function NoOpExpression(token)
+{
+    this.token = token;
+}
+NoOpExpression.prototype.serialize = function (out)
+{
+    return out;
+};
+NoOpExpression.prototype.tokenize = function (stream)
+{
+    return;
+}
+function ScopeExpression(scope)
+{
+    this.scope = scope;
+}
+ScopeExpression.prototype.serialize = function (out)
+{
+    for (var scopeIndex in this.scope)
+    {
+        out += this.scope[scopeIndex].serialize("")
+    }
+    return " {" + out + "} ";
+}
+ScopeExpression.prototype.tokenize = function (stream)
+{
+    stream.push('{');
+    for (var scopeIndex in this.scope)
+    {
+        this.scope[scopeIndex].tokenize(stream);
+    }
+    stream.push('}');
+}
+function BreakExpression(scope)
+{
+    this.scope = scope;
+}
+BreakExpression.prototype.serialize = function (out)
+{
+    return " break ";
+}
+BreakExpression.prototype.tokenize = function (stream)
+{
+    stream.push('b');
+}
+
+
+////////////////////////////////////////////////////
+//
+//          parsers
+//
+////////////////////////////////////////////////////    
+
+
+
+/* parsers */
+function NameParser(precedence)
+{
+    this.precedence = precedence;
+}
+NameParser.prototype.parse = function (parser)
+{
+    return new NameExpression(parser.currentToken);
+}
+function ConstParser(precedence, type)
+{
+    this.precedence = precedence;
+    this.type = type;
+}
+ConstParser.prototype.parse = function (parser)
+{
+    return new ConstExpression(parser.currentToken, this.type);
+}
+function PrefixParser(precedence)
+{
+    this.precedence = precedence;
+}
+PrefixParser.prototype.parse = function (parser)
+{
+    return new PrefixExpression(parser.currentToken, parser.parseNext(this.precedence));
+}
+function PostfixParser(precedence)
+{
+    this.precedence = precedence;
+}
+PostfixParser.prototype.parse = function (parser, left, token)
+{
+    return new PostfixExpression(left, token);
+}
+function AssignParser(precedence)
+{
+    this.precedence = precedence;
+}
+AssignParser.prototype.parse = function (parser, left)
+{
+    var right = parser.parseNext(this.precedence - 1);
+    if (left.name == undefined && left.operator.token != VAR)
+    {
+        return null;
+    }
+    return new AssignExpression(left, right);
+};
+function ComparisonParser(precedence)
+{
+    this.precedence = precedence;
+}
+ComparisonParser.prototype.parse = function (parser, left, operator)
+{
+    var right = parser.parseNext(this.precedence - 1);
+    return new ComparisonExpression(left, operator, right);
+};
+function ConditionalParser(precedence)
+{
+    this.precedence = precedence;
+}
+ConditionalParser.prototype.parse = function (parser, left)
+{
+    var thenArm = parser.parseNext(0);
+    //parser.parseNext(0);
+    //var elseArm = parser.parseNext(0);
+    return new ConditionalExpression(left, thenArm);
+};
+function ElseParser(precedence)
+{
+    this.precedence = precedence;
+}
+ElseParser.prototype.parse = function (parser, left)
+{
+    var elseArm = parser.parseNext(0);
+    return new ElseExpression(elseArm);
+};
+function CaseParser(precedence)
+{
+    this.precedence = precedence;
+}
+CaseParser.prototype.parse = function (parser, left)
+{
+    var condition = parser.parseNext(0);
+    // eat the :
+    if (parser.peekNextToken() == ":")
+        parser.pop();
+    var body = [];
+    var count = 0;
+    while (parser.peekNextToken() != CASE && parser.peekNextToken() != '}' && parser.peekNextToken() != DEFAULT)
+    {
+        body[count++] = parser.parseNext(0);
+    }
+
+    return new CaseExpression(condition, body);
+};
+function OperatorParser(precedence, isRight)
+{
+    this.precedence = precedence;
+    this.isRight = isRight;
+}
+OperatorParser.prototype.parse = function (parser, left, operator)
+{
+    var right = parser.parseNext(this.precedence - (this.isRight ? 1 : 0));
+    return new OperatorExpression(left, operator, right);
+};
+function CallParser(precedence)
+{
+    this.precedence = precedence;
+}
+CallParser.prototype.parse = function (parser, left)
+{
+    var args = [];
+    var body = null;
+    var count = 0;
+    if (parser.peekNextToken() != ")")
+    {
+        var more = true;
+        while (more)
+        {
+            args[count++] = parser.parseNext(0);
+            if (parser.peekNextToken() == "," || parser.peekNextToken() == ";")
+            {
+                // eat the comma
+                parser.parseNext(100);
+            } else
+            {
+                more = false;
+            }
+        }
+    }
+    if (parser.peekNextToken() == ")")
+    {
+        parser.parseNext(0);
+    }
+    switch(left.name.text){
+        case "while":
+            body = parser.parseNext(PRECEDENT_CALL);
+            return new WhileExpression(left, args, body);
+        case "for":
+            body = parser.parseNext(PRECEDENT_CALL);
+            return new ForExpression(left, args, body);
+        case "switch":
+            body = parser.parseNext(PRECEDENT_CALL);
+            return new SwitchExpression(left, args[0], body);
+        case "if":
+            var thenArm = parser.parseNext(0);
+            return new ConditionalExpression(args[0], thenArm);
+        default:
+        return new CallExpression(left, args);
+    }
+
+};
+function GroupParser(precedence)
+{
+    this.precedence = precedence;
+}
+GroupParser.prototype.parse = function (parser)
+{
+    var expression = parser.parseNext(0);
+    parser.parseNext(0); // ")"
+    return expression;
+};
+function ScopeParser(precedence)
+{
+    this.precedence = precedence;
+}
+ScopeParser.prototype.parse = function (parser)
+{
+    var scope = [];
+    var count = 0;
+    if (parser.peekNextToken() != "}")
+    {
+        var more = true;
+        while (more)
+        {
+            scope[count++] = parser.parseNext(0);
+            if (parser.peekNextToken() == "}")
+            {
+                parser.parseNext(100);
+                more = false;
+            }
+        }
+    }
+    return new ScopeExpression(scope);
+};
+function PassThrough(precedence)
+{
+    this.precedence = precedence;
+}
+PassThrough.prototype.parse = function(parser)
+{
+    return new PassThroughExpression(parser.currentToken);
+}
+function NoOp(precedence)
+{
+    this.precedence = precedence;
+}
+NoOp.prototype.parse = function (parser)
+{
+    return new NoOpExpression(parser.currentToken);
+};
+function BreakParser(precedence)
+{
+    this.precedence = precedence;
+}
+BreakParser.prototype.parse = function (parser)
+{
+    return new BreakExpression(parser.currentToken);
+};
+
+
+////////////////////////////////////////////////////
+//
+//          lexer
+//
+////////////////////////////////////////////////////    
+
+
+/* Tokens */
+var LEFT_PAREN = "(";
+var RIGHT_PAREN = ")";
+var LEFT_CURL = "{";
+var RIGHT_CURL = "}";
+var COMMA = ",";
+var ASSIGN = "=";
+var PLUS = "+";
+var MINUS = "-";
+var ASTERISK = "*";
+var SLASH = "/";
+var CARET = "^";
+var TILDE = "~";
+var BANG = "!";
+var QUESTION = "?";
+var COLON = ":";
+var QUOTATION = "\"";
+var INCREMENT = "++";
+var DECREMENT = "--";
+var EQUALITY = "==";
+var GREATER = ">";
+var LESS = "<";
+var GREATER_EQUALS = ">=";
+var LESS_EQUALS = "<=";
+var VAR = "var";
+var BREAK = "break";
+var DEFAULT = "default";
+var SWITCH = "switch";
+var CASE = "case";
+var IF = "if";
+var WHILE = "while";
+var FOR = "for";
+var VARIABLE = "~var~";
+var NUMBER = "~number~";
+var STRING = "~string~";
+var SEMICOLON = ";";
+var EOF = "EOF";
+
+var tokenList = [LEFT_PAREN, RIGHT_PAREN, COMMA, ASSIGN, PLUS, MINUS, ASTERISK, SLASH, CARET, TILDE, BANG, QUESTION, COLON, QUOTATION, EQUALITY, GREATER, LESS, GREATER_EQUALS, LESS_EQUALS, VARIABLE, NUMBER, STRING, SEMICOLON, LEFT_CURL, RIGHT_CURL, INCREMENT, DECREMENT, CASE, EOF];
+var keywordList = [VAR,BREAK,DEFAULT];
+
+function Token(token, text)
+{
+    this.token = token;
+    this.text = text;
+}
+
+
+var prefixTokens = {};
+var infixTokens = {};
+prefixTokens[LEFT_PAREN] = new GroupParser(-1);
+infixTokens[LEFT_PAREN] = new CallParser(PRECEDENT_CALL);
+
+prefixTokens[LEFT_CURL] = new ScopeParser(PRECEDENT_CALL);
+prefixTokens[RIGHT_CURL] = new NoOp(-1);
+
+prefixTokens[INCREMENT] = new PrefixParser(PRECEDENT_PREFIX);
+infixTokens[INCREMENT] = new PostfixParser(PRECEDENT_POSTFIX);
+
+prefixTokens[DECREMENT] = new PrefixParser(PRECEDENT_PREFIX);
+infixTokens[DECREMENT] = new PostfixParser(PRECEDENT_POSTFIX);
+
+prefixTokens[VARIABLE] = new NameParser(-1);
+prefixTokens[NUMBER] = new ConstParser(-1, NUMBER);
+prefixTokens[STRING] = new ConstParser(-1, STRING);
+infixTokens[ASSIGN] = new AssignParser(PRECEDENT_ASSIGNMENT);
+infixTokens[QUESTION] = new ConditionalParser(PRECEDENT_CONDITIONAL);
+prefixTokens[COLON] = new ElseParser(PRECEDENT_PREFIX);
+
+prefixTokens[BREAK] = new BreakParser(PRECEDENT_PREFIX);
+
+prefixTokens[PLUS] = new PrefixParser(PRECEDENT_PREFIX);
+prefixTokens[MINUS] = new PrefixParser(PRECEDENT_PREFIX);
+prefixTokens[TILDE] = new PrefixParser(PRECEDENT_PREFIX);
+prefixTokens[BANG] = new PrefixParser(PRECEDENT_PREFIX);
+
+prefixTokens[VAR] = new PrefixParser(PRECEDENT_PREFIX);
+prefixTokens[DEFAULT] = new PrefixParser(PRECEDENT_PREFIX);
+prefixTokens[CASE] = new CaseParser(PRECEDENT_PREFIX);
+
+infixTokens[PLUS] = new OperatorParser(PRECEDENT_SUM, false);
+infixTokens[MINUS] = new OperatorParser(PRECEDENT_SUM, false);
+infixTokens[ASTERISK] = new OperatorParser(PRECEDENT_PRODUCT, false);
+infixTokens[SLASH] = new OperatorParser(PRECEDENT_PRODUCT, false);
+infixTokens[CARET] = new OperatorParser(PRECEDENT_EXPONENT, true);
+
+infixTokens[EQUALITY] = new ComparisonParser(PRECEDENT_PRODUCT, true);
+infixTokens[GREATER] = new ComparisonParser(PRECEDENT_PRODUCT, true);
+infixTokens[GREATER_EQUALS] = new ComparisonParser(PRECEDENT_PRODUCT, true);
+infixTokens[LESS] = new ComparisonParser(PRECEDENT_PRODUCT, true);
+infixTokens[LESS_EQUALS] = new ComparisonParser(PRECEDENT_PRODUCT, true);
+
+prefixTokens[COMMA] = new NoOp(-1);
+prefixTokens[SEMICOLON] = new PassThrough(-1);
+
+/* lexer */
+
+function Lexer(codeString)
+{
+    if (codeString == undefined || !(typeof codeString === "string"))
+    {
+        codeString = "";
+    }
+    this.codeString = codeString;
+    this.index = 0;
+    this.currentToken = 0;
+    this.tokens = [];
+    do {
+        this.tokens[this.currentToken] = this.lex();
+    } while (this.tokens[this.currentToken++] != null);
+    this.currentToken = 0;
+}
+Lexer.prototype.getNext = function ()
+{
+    if (this.currentToken < this.tokens.length)
+    {
+        return this.tokens[this.currentToken++];
+    }
+    return null;
+}
+Lexer.prototype.hasNext = function ()
+{
+    if (this.currentToken < this.tokens.length
+            && this.tokens[this.currentToken] != null)
+    {
+        return true;
+    }
+    return false;
+}
+Lexer.prototype.lex = function ()
+{
+    // advance one, eat whitespace
+    do {
+
+        var c = this.codeString.charAt(this.index++);
+
+    } while (" \t\n\r\f\b".indexOf(c) != -1 && this.index < this.codeString.length);
+
+    var start = this.index-1;
+
+    if (this.index >= this.codeString.length)
+    {
+        return null;
+    }
+
+    var token = null;
+    var tokens = Object.create(tokenList);
+    var currentIndex = this.index;
+    var lastIndex = this.index - 1;
+    var match = null;
+    do {
+        var goodTokens = [];
+        for (var tokenIndex in tokens)
+        {
+            var tokenTest = tokens[tokenIndex];
+            if (tokenTest.indexOf(c) == 0)
+            {
+                if (tokenTest.length == currentIndex - this.index + 1)
+                {
+                    match = tokenTest;
+                }
+                goodTokens[goodTokens.length] = tokenTest;
+            }
+        }
+        tokens = goodTokens;
+        if (tokens.length == 0)
+        {
+            if (match != null)
+            {
+                token = new Token(match, match);
+            } else
+            {
+                if (NUMBERS.indexOf(c[0]) != -1)
+                {
+                    // number
+                    while (currentIndex <= this.codeString.length && NUMBERS.indexOf(this.codeString.charAt(currentIndex)) != -1)
+                    {
+                        c += this.codeString.charAt(currentIndex++);
+                    }
+                    token = new Token(NUMBER, c);
+                    this.index = currentIndex;
+                } else if (VAR_LETTERS.indexOf(c[0]) != -1)
+                {
+                    // variables
+                    while (currentIndex <= this.codeString.length && VAR_LETTERS.indexOf(this.codeString.charAt(currentIndex)) != -1)
+                    {
+                        c += this.codeString.charAt(currentIndex++);
+                    }
+                    // check for keywords
+                    for(var keyIndex in keywordList){
+                        if (c == keywordList[keyIndex]){
+                            token = new Token(keywordList[keyIndex], keywordList[keyIndex]);
+                        }
+                    }
+                    if (token == null){
+                        token = new Token(VARIABLE, c);
+                    }
+                    this.index = currentIndex;
+                }
+            }
+        } else if (tokens.length == 1)
+        {
+            if (tokens[0] == QUOTATION)
+            {
+                // parse string
+                var string = "";
+                var escape = false;
+                c = "";
+                while (currentIndex < this.codeString.length
+                        && (escape == true || this.codeString.charAt(currentIndex) != "\""))
+                {
+                    escape = false;
+                    var s = this.codeString.charAt(currentIndex++);
+                    if (s == "\\")
+                    {
+                        escape = true;
+                    }
+                    c += s;
+                }
+                currentIndex++;
+                token = new Token(STRING, c)
+            } else
+            {
+                var tokenTest = this.codeString.substring(start,start + tokens[0].length);
+                if ( tokenTest == tokens[0]){
+                    // found it
+                    token = new Token(tokens[0], tokens[0]);
+                    currentIndex = start + tokens[0].length;
+                }
+            }
+            this.index = currentIndex;
+        } else
+        {
+            // keep going
+            c += this.codeString.charAt(currentIndex++);
+        }
+        if (currentIndex == lastIndex){
+            break;
+        }
+        lastIndex = currentIndex;
+    } while (token == null || token == undefined && currentIndex < this.codeString.length);
+    if (token == null)
+    {
+        alert("Lexer could not find token at '" + c + "'");
+    }
+    return token;
+};
+
+
+////////////////////////////////////////////////////
+//
+//          the parser
+//
+////////////////////////////////////////////////////    
+
+
+/* parser */
+function Parser(rawCode)
+{
+    this.lexer = new Lexer(rawCode);
+    this.currentToken = null;
+}
+Parser.prototype.hasNext = function ()
+{
+    return this.lexer.hasNext();
+}
+Parser.prototype.parseNext = function (precedence)
+{
+    var token = this.lexer.getNext();
+    this.currentToken = token;
+
+    var prefix = prefixTokens[token.token];
+
+    if (prefix == null)
+    {
+        //alert("No prefix for '" + token.token + "'");
+        return null;
+    }
+
+    var left = prefix.parse(this);
+
+    while (precedence < this.getNextPrecedence() && !(left instanceof PassThroughExpression))
+    {
+        token = this.lexer.getNext();
+
+        var infix = infixTokens[token.token];
+        if (infix == null){
+            alert("No infix for '" + token.token + "'");
+            break;
+        }
+        left = infix.parse(this, left, token);
+    }
+
+    return left;
+
+}
+Parser.prototype.peekNextToken = function ()
+{
+    return this.lexer.tokens[this.lexer.currentToken].token;
+}
+Parser.prototype.pop = function ()
+{
+    return this.lexer.getNext();
+}
+Parser.prototype.getNextPrecedence = function ()
+{
+    if (this.lexer.tokens[this.lexer.currentToken] != null)
+    {
+        var parser = infixTokens[this.lexer.tokens[this.lexer.currentToken].token];
+        if (parser != null)
+        {
+            return parser.precedence;
+        }
+    }
+    return 0;
+}
+
+var l = new Lexer("+ \"\"(test==\"string\"*=5) 15-\"this is \\\"a\\\" test\" 1.2!");
+
+while (l.hasNext())
+{
+    var token = l.getNext();
+    //alert("[" + token.token + ", " + token.text + "]");
+}
+
+function parse(script)
+{
+    var parser = new Parser(script);
+    var code = [];
+    while (parser.hasNext())
+    {
+        code[code.length] = parser.parseNext(0);
+    }
+    var tokens = [];
+    for (var index in code)
+    {
+        code[index].tokenize(tokens);
+        //alert(tokens);
+    }
+    return tokens;
+}
+
+var doIt = function ()
+{
+    //var parser = new Parser("{ a++; b = c++;} a(b ? c : d, e + f)");
+    //alert("here");
+//    var parser = new Parser("{ a++; b = c++;}; a( b ? c : d,1 + 2)");
+//    var code = [];
+//    while (parser.hasNext())
+//    {
+//        code[code.length] = parser.parseNext(0);
+//    }
+//    var out = "";
+//    for (var index in code)
+//    {
+//        out += code[index].serialize("");
+//    }
+    //alert(out);
+    //alert(JSON.stringify(code));
+//    var tokens = [];
+//    for (var index in code)
+//    {
+//        code[index].tokenize(tokens);
+//    }
+    //alert(JSON.stringify(tokens));
+
+    var mojo_environ = MojoInit(document.getElementById("code").value);
+
+    //var mojo_environ = MojoInit(" var test = 0; for(var i = 0; i < 5; i = i + 1) {test = test + 2}; test");
+
+    //var mojo_environ = MojoInit("var test = 0; while(10; test <= 7 ) {2 + 2; test = test + 1;}; test");
+
+    //var mojo_environ = MojoInit("var test = (4 * 3) / 2; test = test + 1; test");
+
+    //var mojo_environ = MojoInit("var test = (4 * 3) / 2; test > 7 ? \"true\" : \"false\"");
+
+    //var mojo_environ = MojoInit("var test = (4 * 3) / 2; 1 ? 0 ? 2+2 : 3+3 : 5 + 5");
+
+    //var mojo_environ = MojoInit("(1 + ++5 - 3) * 2 / 4");
+
+    //alert(JSON.stringify(mojo_environ));
+
+    //alert(tokens);
+}
+
+//doIt();
+</script>
+
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>JSP Page</title>
+</head>
+<body>
+<h1><a href="#" onClick="javascript:doIt()">Hello World!</a></h1><br/>
+    <form>
+        <textarea name="tokens" id="tokens" style="width:100ch;height:5ch"></textarea>
+        <textarea name="results" id="results" style="width:100ch;height:1ch"></textarea>
+        <textarea name="code" id="code" style="width:100ch;height:20ch">
+            var test = 0;
+            for(var i = 0; i < 5; i = i + 1)
+            {
+                test = test + 4;
+            }
+            test
+        </textarea>
+    </form>
+</body>
+</html>

@@ -1,0 +1,176 @@
+/*
+    Processes are represented by a class instance called the process class
+
+    When a script is run as a new process the first class found 
+    is instantiated and is made the process class. For a given script the
+    first process created is refered to as the master process
+*/
+public class ServerTest {
+
+    public ServerTest(){
+        /*
+            The constructor for the process class is the only code
+            that will be automatically run when a process starts.
+            
+            Unless I decide to allow static initializer code
+        */
+        http.createserver(handleRequest).start(8080);
+        
+    }
+
+    include("http");
+    include("fs");
+    
+    private var RequestProcess processes[];
+    private var int badRequestCount = 0;
+    
+    public handleRequest(request,response){
+        var RequestProcess process;
+        
+        /*
+            If there is an idle process in the process array
+            pull it out and use it
+            
+            Otherwise create a new request process 
+        */
+        if (processes.length > 0){
+            /*
+                Because this master process is the only one that manipulates
+                the process array we don't have to worry about locks or synchronizing
+            */
+            process = processes.pop();
+        } else {
+            process = spawn(RequestProcess());
+        }
+        
+        /*
+            Notice the special method calling syntax, this is where the magic happens.
+            This process is not actually calling and executing handleRequest() but is
+            queueing up the handleRequest() method to be executed by the RequestProcess 
+            process. The => syntax tells this process to not wait for the handleRequest()
+            method to be executed before continuing it's own processing. In other words
+            the => denotes an asynchronis method call to another process. If we had insted
+            used process.handleRequest() this process would block until the other process
+            finished executing the handleRequest() method.
+            
+            Asynchronis calls do not have return values.
+        */
+        process=>handleRequest(request,response);
+    }
+
+    /*
+        Once a request process is finished handling a request it will
+        put itself back into the process list. While the request process
+        calls this method it's actually the master process that executes it
+        and since the master process is the only one that manipulates the
+        process array we don't have to worry about locking or synchronizing it
+    */
+    protected readyProcess(process){
+        processes.add(process);
+    }
+    
+    /*
+        Keep a count of bad requests. Once again while the request process
+        calls this method it's only the master process that executes it
+        so we don't need to lock or synchronize this.
+    */
+    protected badRequest(request){
+        badRequestCount++;
+    }
+    
+    /* 
+        this is the class who's instances becomes the process class for each new process the 
+        ServerTest master process creates.
+    */       
+    public class RequestProcess {
+        public RequestProcess(){};
+        
+        public handleRequest(request, response){
+            var String filePath = "." + request.url;
+            if (filePath == "./")
+                filePath = "./index.html";
+            var String extension = fs.extension(filePath);
+            var String contentType = 'text/html';
+            switch(extension){
+                case ".js":
+                    contentType = 'text/javascript';
+                    break;
+                case ".css":
+                    contentType = 'text/css';
+                    break;
+            }
+            
+            if (fs.exists(filePath)){
+                try {
+                    var File file = fs.readFile(filePath);
+                    response.writeHead(200, {'Content-type' : contentType });
+                    response.writeBody(file);
+                    response.end();
+                } catch(e){
+                    response.writeHead(500);
+                    response.end();
+                    owner=>badRequest(request);
+                }
+            } else {
+                response.writeHead(404);
+                response.end()
+            }
+            
+            owner=>readyProcess(this);
+        }
+    }
+}
+
+
+
+
+
+
+---------------------------------
+
+var http = require('http');
+var fs = require('fs');
+var path = require('path');
+
+http.createServer(function (request, response) {
+
+    console.log('request starting...');
+
+    var filePath = '.' + request.url;
+    if (filePath == './')
+        filePath = './index.htm';
+
+    var extname = path.extname(filePath);
+    var contentType = 'text/html';
+    switch (extname) {
+        case '.js':
+            contentType = 'text/javascript';
+            break;
+        case '.css':
+            contentType = 'text/css';
+            break;
+    }
+
+    path.exists(filePath, function(exists) {
+
+        if (exists) {
+            fs.readFile(filePath, function(error, content) {
+                if (error) {
+                    response.writeHead(500);
+                    response.end();
+                }
+                else {
+                    response.writeHead(200, { 'Content-Type': contentType });
+                    response.end(content, 'utf-8');
+                }
+            });
+        }
+        else {
+            response.writeHead(404);
+            response.end();
+        }
+    });
+
+}).listen(8125);
+
+console.log('Server running at http://127.0.0.1:8125/');
